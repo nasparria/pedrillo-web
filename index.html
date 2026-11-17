@@ -1111,8 +1111,35 @@
       const samples = noiseBuffer.getChannelData(0);
       for (let index = 0; index < samples.length; index += 1) samples[index] = Math.random() * 2 - 1;
     }
-    if (audio.state === "suspended") audio.resume();
     return audio;
+  }
+
+  /* Mobile browsers only start audio from a finished tap (touchend / click), never from the
+     initial touch, so the engine is unlocked on the first completed gesture anywhere on the page. */
+  const AUDIO_RUNNING = "running";
+  const AUDIO_SESSION_PLAYBACK = "playback";
+  const UNLOCK_EVENTS = ["touchend", "pointerup", "click", "keydown"];
+  const START_DELAY = 0.005;
+
+  function unlockAudio() {
+    if (!ensureAudio()) return;
+    // Lets iOS play through the speaker even with the silent switch on (Safari 16.4+)
+    if (navigator.audioSession) {
+      try { navigator.audioSession.type = AUDIO_SESSION_PLAYBACK; } catch (error) { /* not supported */ }
+    }
+    if (audio.state !== AUDIO_RUNNING) audio.resume().catch(() => {});
+    const silence = audio.createBufferSource();
+    silence.buffer = audio.createBuffer(1, 1, audio.sampleRate);
+    silence.connect(audio.destination);
+    silence.start(0);
+    if (audio.state === AUDIO_RUNNING) {
+      UNLOCK_EVENTS.forEach((name) => document.removeEventListener(name, unlockAudio, true));
+    }
+  }
+  UNLOCK_EVENTS.forEach((name) => document.addEventListener(name, unlockAudio, true));
+
+  function isAudioRunning() {
+    return Boolean(audio) && audio.state === AUDIO_RUNNING;
   }
 
   function envelope(time, peak, decay) {
@@ -1171,12 +1198,16 @@
   document.querySelectorAll(".beat-pad").forEach((pad) => {
     padBySound[pad.dataset.sound] = pad;
     padByKey[pad.dataset.key] = pad;
-    pad.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      triggerSound(pad.dataset.sound);
+    // Instant response on press once audio is unlocked; otherwise the click plays it.
+    let playedOnPress = false;
+    pad.addEventListener("pointerdown", () => {
+      playedOnPress = isAudioRunning();
+      if (playedOnPress) triggerSound(pad.dataset.sound);
+      else flashPad(pad.dataset.sound);
     });
-    pad.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") triggerSound(pad.dataset.sound);
+    pad.addEventListener("click", () => {
+      if (!playedOnPress) triggerSound(pad.dataset.sound);
+      playedOnPress = false;
     });
   });
 
@@ -1189,8 +1220,10 @@
 
   function triggerSound(sound) {
     if (!ensureAudio()) return;
-    SOUNDS[sound](audio.currentTime + 0.005);
     flashPad(sound);
+    const play = () => SOUNDS[sound](audio.currentTime + START_DELAY);
+    if (isAudioRunning()) play();
+    else audio.resume().then(play).catch(() => {});
   }
 
   window.addEventListener("keydown", (event) => {
